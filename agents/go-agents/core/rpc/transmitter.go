@@ -32,10 +32,10 @@ func (t *Transmitter) Send(message interface{}) {
 }
 
 // SendError wraps the given error with 'rpc.Result' and sends it to the client.
-func (t *Transmitter) SendError(err Error) {
+func (t *Transmitter) SendError(err *Error) {
 	t.Channel.output <- &Response{
 		Version: "2.0",
 		ID:      t.id,
-		Error:   &err,
+		Error:   err,
 	}
 }

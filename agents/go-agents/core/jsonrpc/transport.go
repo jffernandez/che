@@ -3,6 +3,7 @@ package jsonrpc
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strconv"
 	"sync"
@@ -10,13 +11,12 @@ import (
 	"time"
 )
 
-// TODO response transmitter timeout
-// TODO q.watch()
-// TODO develop approach for unmarshalling response error data field
-
 const (
 	DefaultVersion                  = "2.0"
 	ConnectedNotificationMethodName = "connected"
+	DefaultAllowedResponseDelay     = 5 * time.Minute
+	DefaultWatchQueuePeriod         = time.Minute
+	DefaultMaxRequestHoldTimeout    = time.Minute
 )
 
 var (
@@ -50,11 +50,28 @@ type ResponseHandlerFunc func(response *Response, err error)
 // RequestHandler is a single handler for all the channel incoming requests.
 // The goal of the handler is to dispatch each incoming request to the interested side
 // e.g. jsonrpc.Router dispatches registered request to the routes.
-// If the request is not handled in a configured period of time, then
-// the channel will automatically send error response back and the following
-// call to ResponseTransmitter will be ignored.
 type RequestHandler interface {
-	Handle(request *Request, rt ResponseTransmitter)
+
+	// GetMethodHandler must return a handler for a given method and ok=true,
+	// if there is no such handler func must return ok=false
+	GetMethodHandler(method string) (MethodHandler, bool)
+}
+
+// MethodHandler handles a certain method.
+// First raw request parameters are decoded using Decode function
+// and then if call returned no error handle is called.
+type MethodHandler interface {
+
+	// Decode decodes request raw request parameters
+	// e.g. parses json and returns instance of structured params.
+	// If the handler does not need parameters nil, nil should be returned.
+	// If error is not nil Handle is not called.
+	Decode(params []byte) (interface{}, error)
+
+	// Handle handles decoded parameters.
+	// If no Send method is called on response transmitter instance
+	// timeout error timeout error reply will be sent.
+	Handle(params interface{}, rt ResponseTransmitter)
 }
 
 // ResponseTransmitter provides interface which allows to respond to request.
@@ -70,7 +87,7 @@ type ResponseTransmitter interface {
 
 	// SendError sends jsonrpc response with a given error in body.
 	// This function can be called only once on one transmitter instance.
-	SendError(err Error)
+	SendError(err *Error)
 
 	// Channel returns the channel this transmitter belongs to.
 	Channel() Channel
@@ -93,7 +110,12 @@ func NewChannel(conn NativeConn, handler RequestHandler) *Channel {
 		conn:        conn,
 		jsonOutChan: make(chan interface{}),
 		reqHandler:  handler,
-		rq:          &requestQ{pairs: make(map[int64]*rqPair)},
+		rq: &requestQ{
+			pairs:                make(map[int64]*rqPair),
+			allowedResponseDelay: DefaultAllowedResponseDelay,
+			stop:                 make(chan bool),
+			ticker:               time.NewTicker(DefaultWatchQueuePeriod),
+		},
 	}
 }
 
@@ -157,7 +179,7 @@ func (c *Channel) Request(method string, params interface{}, rhf ResponseHandler
 func (c *Channel) RequestBare(method string, rhf ResponseHandlerFunc) {
 	id := atomic.AddInt64(&prevRequestID, 1)
 	request := &Request{ID: id, Method: method}
-	c.rq.add(id, request, rhf)
+	c.rq.add(id, request, time.Now(), rhf)
 	c.jsonOutChan <- request
 }
 
@@ -171,7 +193,7 @@ func (c *Channel) RequestRaw(method string, marshaledParams []byte, rhf Response
 		Method:    method,
 		RawParams: marshaledParams,
 	}
-	c.rq.add(id, request, rhf)
+	c.rq.add(id, request, time.Now(), rhf)
 	c.jsonOutChan <- request
 }
 
@@ -228,10 +250,31 @@ func (c *Channel) mainReadLoop() {
 
 		draft := &draft{}
 		err = json.Unmarshal(bytes, draft)
+
+		// parse error indicated
 		if err != nil {
-			log.Printf("Couldn't unmarshall received frame to request/response. Err %s", err.Error())
+			c.jsonOutChan <- &Response{
+				Version: DefaultVersion,
+				ID:      nil,
+				Error:   NewError(ParseErrorCode, errors.New("Error while parsing request")),
+			}
+			continue
 		}
 
+		// version check
+		if draft.Version == "" {
+			draft.Version = DefaultVersion
+		} else if draft.Version != DefaultVersion {
+			err := fmt.Errorf("Version %s is not supported, please use %s", draft.Version, DefaultVersion)
+			c.jsonOutChan <- &Response{
+				Version: DefaultVersion,
+				ID:      nil,
+				Error:   NewError(InvalidRequestErrorCode, err),
+			}
+			continue
+		}
+
+		// dispatching
 		if draft.Method == "" {
 			c.dispatchResponse(&Response{
 				Version: draft.Version,
@@ -275,14 +318,38 @@ func (c *Channel) dispatchResponse(r *Response) {
 }
 
 func (c *Channel) dispatchRequest(r *Request) {
-	if r.IsNotification() {
-		c.reqHandler.Handle(r, &notificationRespTransmitter{r})
-	} else {
-		c.reqHandler.Handle(r, &requestRespTransmitter{
-			reqId:   r.ID,
-			channel: c,
-		})
+	handler, ok := c.reqHandler.GetMethodHandler(r.Method)
+
+	if !ok {
+		c.jsonOutChan <- &Response{
+			ID:      r.ID,
+			Version: DefaultVersion,
+			Error:   NewErrorf(MethodNotFoundErrorCode, "No such method %s", r.Method),
+		}
+		return
 	}
+
+	// handle params decoding
+	decodedParams, err := handler.Decode(r.RawParams)
+	if err != nil {
+		c.jsonOutChan <- &Response{
+			ID:      r.ID,
+			Version: DefaultVersion,
+			Error:   NewError(ParseErrorCode, errors.New("Couldn't parse params")),
+		}
+		return
+	}
+
+	// pick the right transmitter
+	var transmitter ResponseTransmitter
+	if r.IsNotification() {
+		transmitter = &doNothingTransmitter{r}
+	} else {
+		transmitter = newWatchingRespTransmitter(r.ID, c)
+	}
+
+	// make a method call
+	handler.Handle(decodedParams, transmitter)
 }
 
 // both request and response
@@ -295,8 +362,12 @@ type draft struct {
 	Error     *Error          `json:"error,omitempty"`
 }
 
-func NewCloseErr(err error) *CloseError {
+func NewCloseError(err error) *CloseError {
 	return &CloseError{error: err}
+}
+
+func NewTimeoutError(err error) *TimeoutError {
+	return &TimeoutError{err}
 }
 
 type rqPair struct {
@@ -317,41 +388,45 @@ type requestQ struct {
 }
 
 func (q *requestQ) watch() {
-	//for {
-	//	select {
-	//	case <-q.ticker.C:
-	//		cleanTime := time.Now().Add(-q.allowedResponseDelay)
-	//		hermits := make([]int64, 0)
-	//		q.RLock()
-	//		for id, pair := range q.pairs {
-	//			if pair.saved.Before(cleanTime) {
-	//				hermits = append(hermits, id)
-	//			}
-	//		}
-	//		q.RUnlock()
-	//
-	//		for _, id := range hermits {
-	//			if rqPair, ok := q.remove(id); ok {
-	//				rqPair.respHandlerFunc(nil, &TimeoutError{errors.New("Response didn't arrive in time")})
-	//			}
-	//		}
-	//	case <-q.stop:
-	//		return
-	//	}
-	//}
+	for {
+		select {
+		case <-q.ticker.C:
+			q.dropOutdatedOnce()
+		case <-q.stop:
+			q.ticker.Stop()
+			return
+		}
+	}
 }
 
-func (q *requestQ) stopWatching() {
-	//q.stop <- true
+func (q *requestQ) dropOutdatedOnce() {
+	dropTime := time.Now().Add(-q.allowedResponseDelay)
+	dropout := make([]int64, 0)
+
+	q.RLock()
+	for id, pair := range q.pairs {
+		if pair.saved.Before(dropTime) {
+			dropout = append(dropout, id)
+		}
+	}
+	q.RUnlock()
+
+	for _, id := range dropout {
+		if rqPair, ok := q.remove(id); ok {
+			rqPair.respHandlerFunc(nil, &TimeoutError{errors.New("Response didn't arrive in time")})
+		}
+	}
 }
 
-func (q *requestQ) add(id int64, r *Request, rhf ResponseHandlerFunc) {
+func (q *requestQ) stopWatching() { q.stop <- true }
+
+func (q *requestQ) add(id int64, r *Request, time time.Time, rhf ResponseHandlerFunc) {
 	q.Lock()
 	defer q.Unlock()
 	q.pairs[id] = &rqPair{
 		request:         r,
 		respHandlerFunc: rhf,
-		saved:           time.Now(),
+		saved:           time,
 	}
 }
 
@@ -365,35 +440,69 @@ func (q *requestQ) remove(id int64) (*rqPair, bool) {
 	return pair, ok
 }
 
-type requestRespTransmitter struct {
+func newWatchingRespTransmitter(id interface{}, c *Channel) *respTransmitter {
+	t := &respTransmitter{
+		reqId:   id,
+		channel: c,
+		once:    &sync.Once{},
+		done:    make(chan bool, 1),
+	}
+	go t.watch(DefaultMaxRequestHoldTimeout)
+	return t
+}
+
+type respTransmitter struct {
 	reqId   interface{}
 	channel *Channel
+	once    *sync.Once
+	done    chan bool
 }
 
-func (drt *requestRespTransmitter) Send(result interface{}) {
-	bytes, _ := json.Marshal(result)
-	drt.channel.jsonOutChan <- &Response{
-		Version: DefaultVersion,
-		ID:      drt.reqId,
-		Result:  bytes,
+func (drt *respTransmitter) watch(timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	select {
+	case <-timer.C:
+		drt.SendError(NewErrorf(InternalErrorCode, "Request %v was not handled by the server in time", drt.reqId))
+	case <-drt.done:
+		timer.Stop()
 	}
 }
 
-func (drt *requestRespTransmitter) SendError(err Error) {
-	drt.channel.jsonOutChan <- &Response{
-		Version: DefaultVersion,
-		ID:      drt.reqId,
-		Error:   &err,
-	}
+func (drt *respTransmitter) Send(result interface{}) {
+	drt.release(func() {
+		marshaled, _ := json.Marshal(result)
+		drt.channel.jsonOutChan <- &Response{
+			Version: DefaultVersion,
+			ID:      drt.reqId,
+			Result:  marshaled,
+		}
+	})
 }
 
-func (drt *requestRespTransmitter) Channel() Channel { return *drt.channel }
+func (drt *respTransmitter) SendError(err *Error) {
+	drt.release(func() {
+		drt.channel.jsonOutChan <- &Response{
+			Version: DefaultVersion,
+			ID:      drt.reqId,
+			Error:   err,
+		}
+	})
+}
 
-type notificationRespTransmitter struct {
+func (drt *respTransmitter) release(f func()) {
+	drt.once.Do(func() {
+		f()
+		drt.done <- true
+	})
+}
+
+func (drt *respTransmitter) Channel() Channel { return *drt.channel }
+
+type doNothingTransmitter struct {
 	request *Request
 }
 
-func (nrt *notificationRespTransmitter) logNoResponse(res interface{}) {
+func (nrt *doNothingTransmitter) logNoResponse(res interface{}) {
 	log.Printf(
 		"The response to the notification '%s' will not be send(jsonrpc2.0 spec). The response was %T, %v",
 		nrt.request.Method,
@@ -402,8 +511,8 @@ func (nrt *notificationRespTransmitter) logNoResponse(res interface{}) {
 	)
 }
 
-func (nrt *notificationRespTransmitter) Send(result interface{}) { nrt.logNoResponse(result) }
+func (nrt *doNothingTransmitter) Send(result interface{}) { nrt.logNoResponse(result) }
 
-func (nrt *notificationRespTransmitter) SendError(err Error) { nrt.logNoResponse(err) }
+func (nrt *doNothingTransmitter) SendError(err *Error) { nrt.logNoResponse(err) }
 
-func (nrt *notificationRespTransmitter) Channel() Channel { return Channel{} }
+func (nrt *doNothingTransmitter) Channel() Channel { return Channel{} }

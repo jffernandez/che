@@ -1,11 +1,21 @@
 package jsonrpc
 
-var (
-	DefaultRouter = &Router{}
+import (
+	"log"
+	"sync"
 )
+
+var DefaultRouter = NewRouter()
+
+func RegisterRoute(r Route) { DefaultRouter.Register(r) }
+
+func RegisterRoutesGroup(rg RoutesGroup) { DefaultRouter.RegisterGroup(rg) }
+
+func RegisterRoutesGroups(rgs []RoutesGroup) { DefaultRouter.RegisterGroups(rgs) }
 
 // Route defines named operation and its handler.
 type Route struct {
+
 	// Method is the operation name like defined by Request.Method.
 	Method string
 
@@ -24,14 +34,60 @@ type Route struct {
 	HandlerFunc func(params interface{}, t ResponseTransmitter)
 }
 
+func (r Route) Decode(params []byte) (interface{}, error) { return r.DecoderFunc(params) }
+
+func (r Route) Handle(params interface{}, rt ResponseTransmitter) { r.HandlerFunc(params, rt) }
+
+// RoutesGroup is named group of rpc routes
+type RoutesGroup struct {
+	// The name of this group e.g.: 'ProcessRPCRoutes'
+	Name string
+
+	// Rpc routes of this group
+	Items []Route
+}
+
 type Router struct {
-
+	mutex  sync.RWMutex
+	routes map[string]Route
 }
 
-func (r *Router) Manage(conn NativeConn) {
-
+func NewRouter() *Router {
+	return &Router{routes: make(map[string]Route)}
 }
 
-func (r *Router) Handle(request *Request, rt ResponseTransmitter) {
+func (r *Router) Register(route Route) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.routes[route.Method] = route
+}
 
+func (r *Router) RegisterGroup(group RoutesGroup) {
+	for _, route := range group.Items {
+		r.Register(route)
+	}
+}
+
+func (r *Router) RegisterGroups(groups []RoutesGroup) {
+	for _, group := range groups {
+		r.RegisterGroup(group)
+	}
+}
+
+func (r *Router) GetMethodHandler(method string) (MethodHandler, bool) {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	route, ok := r.routes[method]
+	return route, ok
+}
+
+// PrintRoutes prints provided rpc routes by group
+func PrintRoutes(rg []RoutesGroup) {
+	log.Print("⇩ Registered RPCRoutes:\n\n")
+	for _, group := range rg {
+		log.Printf("%s:\n", group.Name)
+		for _, route := range group.Items {
+			log.Printf("✓ %s\n", route.Method)
+		}
+	}
 }

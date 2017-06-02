@@ -16,6 +16,7 @@ package jsonrpc
 
 import (
 	"encoding/json"
+	"fmt"
 )
 
 const (
@@ -135,15 +136,19 @@ type Error struct {
 }
 
 // NewArgsError creates error object from provided error and sets error code InvalidParamsErrorCode.
-func NewArgsError(err error) Error {
-	return NewError(err, InvalidParamsErrorCode)
+func NewArgsError(err error) *Error {
+	return NewError(InvalidParamsErrorCode, err)
 }
 
 // NewError creates an error from the given error and code.
-func NewError(err error, code int) Error {
-	return Error{
+func NewError(code int, err error) *Error {
+	return &Error{
 		error:   err,
 		Code:    code,
 		Message: err.Error(),
 	}
+}
+
+func NewErrorf(code int, format string, args ...interface{}) *Error {
+	return NewError(code, fmt.Errorf(format, args...))
 }

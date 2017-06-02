@@ -130,12 +130,6 @@ func TestReceivingRequest(t *testing.T) {
 	reqRecorder.WaitHandleCalled(1)
 
 	receivedReq, _ := reqRecorder.Get(0)
-	if receivedReq.Method != sentReq.Method {
-		t.Fatalf("Sent method %s but received %s", sentReq.Method, receivedReq.Method)
-	}
-	if receivedReq.ID != sentReq.ID {
-		t.Fatalf("Sent id %T %v but received %T %v", sentReq.ID, sentReq.ID, receivedReq.ID, receivedReq.ID)
-	}
 	if string(receivedReq.RawParams) != string(sentReq.RawParams) {
 		t.Fatalf("Sent params %s but received %s", string(sentReq.RawParams), string(receivedReq.RawParams))
 	}
@@ -237,6 +231,38 @@ func TestRequestResponseHandling(t *testing.T) {
 	}
 }
 
+func TestSendingBrokenData(t *testing.T) {
+	channel, connRecorder, reqRecorder := newTestChannel()
+	channel.Go()
+	defer channel.Close()
+	defer reqRecorder.Close()
+
+	connRecorder.PushNextRaw([]byte("{not-a-json}"))
+
+	connRecorder.WaitUntil(WriteCalledAtLeast(1))
+
+	response, err := connRecorder.GetResponse(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if response.ID != nil {
+		t.Fatal("Response id must be nill")
+	}
+	if response.Version != jsonrpc.DefaultVersion {
+		t.Fatalf("Exected response version to be %d but it is %d", jsonrpc.DefaultVersion, response.Version)
+	}
+	if response.Result != nil {
+		t.Fatalf("Expected response result to be nil, but it is %v", string(response.Result))
+	}
+	if response.Error == nil {
+		t.Fatal("Expected response to contain error")
+	}
+	if response.Error.Code != jsonrpc.ParseErrorCode {
+		t.Fatalf("Expected error code to be %d but it is %d", jsonrpc.ParseErrorCode, response.Error.Code)
+	}
+}
+
 // WaitPredicate is used to wait on recorder until the condition
 // behind this predicate is met.
 type WaitPredicate func(recorder *NativeConnRecorder) bool
@@ -280,33 +306,48 @@ func NewRecordingRequestHandler() *RequestsRecorder {
 	}
 }
 
-func (rrh *RequestsRecorder) Handle(r *jsonrpc.Request, rt jsonrpc.ResponseTransmitter) {
-	rrh.mutex.Lock()
-	defer rrh.mutex.Unlock()
-	rrh.requests = append(rrh.requests, &reqPair{request: r, transmitter: rt})
-	rrh.cond.Broadcast()
+func (recorder *RequestsRecorder) GetMethodHandler(method string) (jsonrpc.MethodHandler, bool) {
+	return recorder, true
 }
 
-func (rrh *RequestsRecorder) WaitHandleCalled(times int) {
-	rrh.cond.L.Lock()
-	for !rrh.closed && len(rrh.requests) < times {
-		rrh.cond.Wait()
+func (recorder *RequestsRecorder) Decode(params []byte) (interface{}, error) {
+	return params, nil
+}
+
+func (recorder *RequestsRecorder) Handle(params interface{}, rt jsonrpc.ResponseTransmitter) {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	if byteParams, ok := params.([]byte); ok {
+		recorder.requests = append(recorder.requests, &reqPair{
+			request: &jsonrpc.Request{
+				RawParams: byteParams,
+			},
+			transmitter: rt,
+		})
+		recorder.cond.Broadcast()
 	}
-	rrh.cond.L.Unlock()
 }
 
-func (rrh *RequestsRecorder) Get(idx int) (*jsonrpc.Request, jsonrpc.ResponseTransmitter) {
-	rrh.mutex.Lock()
-	defer rrh.mutex.Unlock()
-	pair := rrh.requests[idx]
+func (recorder *RequestsRecorder) WaitHandleCalled(times int) {
+	recorder.cond.L.Lock()
+	for !recorder.closed && len(recorder.requests) < times {
+		recorder.cond.Wait()
+	}
+	recorder.cond.L.Unlock()
+}
+
+func (recorder *RequestsRecorder) Get(idx int) (*jsonrpc.Request, jsonrpc.ResponseTransmitter) {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	pair := recorder.requests[idx]
 	return pair.request, pair.transmitter
 }
 
-func (rrh *RequestsRecorder) Close() {
-	rrh.mutex.Lock()
-	defer rrh.mutex.Unlock()
-	rrh.closed = true
-	rrh.cond.Broadcast()
+func (recorder *RequestsRecorder) Close() {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	recorder.closed = true
+	recorder.cond.Broadcast()
 }
 
 type NativeConnRecorder struct {
@@ -399,7 +440,7 @@ func (ncr *NativeConnRecorder) Write(body []byte) error {
 func (ncr *NativeConnRecorder) Next() ([]byte, error) {
 	data, ok := <-ncr.nextChan
 	if !ok {
-		return nil, jsonrpc.NewCloseErr(errors.New("Closed"))
+		return nil, jsonrpc.NewCloseError(errors.New("Closed"))
 	}
 	return data, nil
 }
