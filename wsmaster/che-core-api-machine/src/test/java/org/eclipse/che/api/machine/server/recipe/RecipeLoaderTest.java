@@ -11,6 +11,7 @@
 package org.eclipse.che.api.machine.server.recipe;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 
 import org.eclipse.che.api.core.ConflictException;
 import org.eclipse.che.api.core.NotFoundException;
@@ -50,7 +51,7 @@ public class RecipeLoaderTest {
     @BeforeMethod
     public void startup() throws Exception {
         when(dbInitializer.getInitProperties()).thenReturn(ImmutableMap.of(BARE_DB_INIT_PROPERTY_NAME, "true"));
-        recipeLoader = new RecipeLoader("recipes.json", recipeDao, dbInitializer);
+        recipeLoader = new RecipeLoader(ImmutableSet.of("recipes.json"), recipeDao, dbInitializer);
     }
 
     @Test
@@ -62,7 +63,7 @@ public class RecipeLoaderTest {
 
     @Test
     public void shouldNotThrowExceptionWhenLoadPredefinedRecipesFromInvalidJson() throws Exception {
-        recipeLoader = new RecipeLoader("invalid-recipes.json", recipeDao, dbInitializer);
+        recipeLoader = new RecipeLoader(ImmutableSet.of("invalid-recipes.json"), recipeDao, dbInitializer);
 
         recipeLoader.start();
     }
@@ -80,7 +81,7 @@ public class RecipeLoaderTest {
 
     @Test
     public void doNotThrowExceptionWhenFileWithRecipesBySpecifiedPathIsNotExist() throws Exception {
-        recipeLoader = new RecipeLoader("non-existing-file", recipeDao, dbInitializer);
+        recipeLoader = new RecipeLoader(ImmutableSet.of("non-existing-file"), recipeDao, dbInitializer);
 
         recipeLoader.start();
 

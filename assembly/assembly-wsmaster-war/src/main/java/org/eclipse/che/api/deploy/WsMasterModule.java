@@ -14,7 +14,6 @@ import com.google.inject.AbstractModule;
 import com.google.inject.multibindings.MapBinder;
 import com.google.inject.multibindings.Multibinder;
 import com.google.inject.name.Names;
-import com.google.inject.util.Providers;
 
 import org.eclipse.che.api.agent.LSCSharpAgent;
 import org.eclipse.che.api.agent.LSJsonAgent;
@@ -137,7 +136,8 @@ public class WsMasterModule extends AbstractModule {
                 .to(org.eclipse.che.api.agent.server.WsAgentHealthCheckerImpl.class);
 
         bind(org.eclipse.che.api.machine.server.recipe.RecipeLoader.class);
-        bindConstant().annotatedWith(Names.named(RecipeLoader.CHE_PREDEFINED_RECIPES)).to("predefined-recipes.json");
+        Multibinder.newSetBinder(binder(), String.class, Names.named(RecipeLoader.CHE_PREDEFINED_RECIPES))
+                   .addBinding().toInstance("predefined-recipes.json");
 
         bind(org.eclipse.che.api.workspace.server.WorkspaceValidator.class)
                 .to(org.eclipse.che.api.workspace.server.DefaultWorkspaceValidator.class);

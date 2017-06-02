@@ -34,6 +34,7 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.eclipse.che.core.db.DBInitializer.BARE_DB_INIT_PROPERTY_NAME;
 
@@ -55,13 +56,11 @@ public class RecipeLoader {
 
     protected final RecipeDao recipeDao;
 
-    private final String        predefinedRecipes;
+    private final Set<String>   predefinedRecipes;
     private final DBInitializer dbInitializer;
 
-
     @Inject
-    @SuppressWarnings("unused")
-    public RecipeLoader(@Named(CHE_PREDEFINED_RECIPES) String predefinedRecipes,
+    public RecipeLoader(@Named(CHE_PREDEFINED_RECIPES) Set<String> predefinedRecipes,
                         RecipeDao recipeDao,
                         DBInitializer dbInitializer) {
         this.predefinedRecipes = predefinedRecipes;
@@ -72,7 +71,10 @@ public class RecipeLoader {
     @PostConstruct
     public void start() {
         if (Boolean.parseBoolean(dbInitializer.getInitProperties().get(BARE_DB_INIT_PROPERTY_NAME))) {
-            loadRecipes(predefinedRecipes).forEach(this::doCreate);
+            for (String toLoad : predefinedRecipes) {
+                loadRecipes(toLoad).forEach(this::doCreate);
+            }
+            LOG.info("Recipes initialization finished");
         }
     }
 
