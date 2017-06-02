@@ -1,0 +1,5 @@
+{
+  "id": "org.eclipse.che.git",
+  "name": "Git-Agent",
+  "description": "Agent for injecting SSH keys and user data from user's preferences to Git"
+}

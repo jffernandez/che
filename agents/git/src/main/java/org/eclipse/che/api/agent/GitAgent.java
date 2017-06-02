@@ -19,19 +19,22 @@ import org.eclipse.che.api.agent.shared.model.impl.BasicAgent;
 import java.io.IOException;
 
 /**
- * Ssh agent.
+ * Git agent.
+ * Creates sh script that retrieves ssh keys,
+ * Git username and email from user preferences via API.
+ * The script executes on each git ssh operations.
  *
  * @see Agent
  *
- * @author Anatolii Bazko
+ * @author Igor Vinokur
  */
 @Singleton
-public class GitSshAgent extends BasicAgent {
-    private static final String AGENT_DESCRIPTOR = "org.eclipse.che.git.ssh.json";
-    private static final String AGENT_SCRIPT     = "org.eclipse.che.git.ssh.script.sh";
+public class GitAgent extends BasicAgent {
+    private static final String AGENT_DESCRIPTOR = "org.eclipse.che.git.json";
+    private static final String AGENT_SCRIPT     = "org.eclipse.che.git.script.sh";
 
     @Inject
-    public GitSshAgent() throws IOException {
+    public GitAgent() throws IOException {
         super(AGENT_DESCRIPTOR, AGENT_SCRIPT);
     }
 }

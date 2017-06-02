@@ -18,20 +18,12 @@
         <groupId>org.eclipse.che</groupId>
         <version>5.12.0-SNAPSHOT</version>
     </parent>
-    <artifactId>git-ssh-key-injector-agent</artifactId>
-    <name>SSH Agent</name>
+    <artifactId>git-agent</artifactId>
+    <name>Git Agent</name>
     <dependencies>
         <dependency>
             <groupId>com.google.inject</groupId>
             <artifactId>guice</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>javax.inject</groupId>
-            <artifactId>javax.inject</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.eclipse.che.core</groupId>
-            <artifactId>che-core-api-agent</artifactId>
         </dependency>
         <dependency>
             <groupId>org.eclipse.che.core</groupId>
